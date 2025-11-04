@@ -26,25 +26,6 @@ void CentripetalRandomWalkActorPlugin::Load(physics::ModelPtr _model, sdf::Eleme
     this->model = _model;
     this->actor = boost::dynamic_pointer_cast<physics::Actor>(_model);
 
-    if (!rclcpp::ok()) {
-        int argc = 0;
-        char **argv = nullptr;
-        rclcpp::init(argc, argv);
-    }
-
-    rclcpp::NodeOptions nodeOptions;
-    nodeOptions.arguments({"--ros-args", "-p", "use_sim_time:=true"});
-
-    rosNode = rclcpp::Node::make_shared("centripetal_random_walk_actor_plugin_node", nodeOptions);
-    idsPub = rosNode->create_publisher<hri_msgs::msg::IdsList>("/humans/bodies/tracked", 10);
-    tfBroadcaster = std::make_unique<tf2_ros::TransformBroadcaster>(rosNode);
-
-    executor = std::make_shared<rclcpp::executors::SingleThreadedExecutor>();
-    executor->add_node(rosNode);
-    spinThread = std::thread([this]() {
-        executor->spin();
-    });
-
     if (!this->actor)
     {
         gzerr << "CentripetalRandomWalkActorPlugin requires an Actor.\n";
@@ -56,36 +37,61 @@ void CentripetalRandomWalkActorPlugin::Load(physics::ModelPtr _model, sdf::Eleme
     if (hasWorldLimits && _sdf->GetElement("world_limits")->HasElement("x_max"))
     {
         maxX = _sdf->GetElement("world_limits")->GetElement("x_max")->Get<double>();
-        RCLCPP_INFO(rosNode->get_logger(), "x_max set to %f", maxX);
+        gzmsg << "x_max set to " << maxX << "\n";
     } else {
-        RCLCPP_INFO(rosNode->get_logger(), "Using default x_max %f", maxX);
+        gzmsg << "Using default x_max " << maxX << "\n";
     }
     if (hasWorldLimits && _sdf->GetElement("world_limits")->HasElement("x_min"))
     {
         minX = _sdf->GetElement("world_limits")->GetElement("x_min")->Get<double>();
-        RCLCPP_INFO(rosNode->get_logger(), "x_min set to %f", minX);
+        gzmsg << "x_min set to " << minX << "\n";
     } else {
-        RCLCPP_INFO(rosNode->get_logger(), "Using default x_min %f", minX);
+        gzmsg << "Using default x_min " << minX << "\n";
     }
     if (hasWorldLimits && _sdf->GetElement("world_limits")->HasElement("y_max"))
     {
         maxY = _sdf->GetElement("world_limits")->GetElement("y_max")->Get<double>();
-        RCLCPP_INFO(rosNode->get_logger(), "y_max set to %f", maxY);
+        gzmsg << "y_max set to " << maxY << "\n";
     } else {
-        RCLCPP_INFO(rosNode->get_logger(), "Using default y_max %f", maxY);
+        gzmsg << "Using default y_max " << maxY << "\n";
     }
     if (hasWorldLimits && _sdf->GetElement("world_limits")->HasElement("y_min"))
     {
         minY = _sdf->GetElement("world_limits")->GetElement("y_min")->Get<double>();
-        RCLCPP_INFO(rosNode->get_logger(), "y_min set to %f", minY);
+        gzmsg << "y_min set to " << minY << "\n";
     } else {
-        RCLCPP_INFO(rosNode->get_logger(), "Using default y_min %f", minY);
+        gzmsg << "Using default y_min " << minY << "\n";
     }
 
     if (maxX <= minX || maxY <= minY)
     {
-        RCLCPP_ERROR(rosNode->get_logger(), "Invalid world limits specified. Check that x_max > x_min and y_max > y_min.");
+        gzerr << "Invalid world limits specified. Check that x_max > x_min and y_max > y_min.\n";
         return;
+    }
+
+    hriSimulation = _sdf->HasElement("hri_simulation") && _sdf->Get<bool>("hri_simulation");
+    gzmsg << "ROS4HRI Simulation mode: " << (hriSimulation ? "ON" : "OFF") << "\n";
+
+    if (hriSimulation) {
+        if (!rclcpp::ok()) {
+            int argc = 0;
+            char **argv = nullptr;
+            rclcpp::init(argc, argv);
+        }
+
+
+        rclcpp::NodeOptions nodeOptions;
+        nodeOptions.arguments({"--ros-args", "-p", "use_sim_time:=true"});
+
+        rosNode = rclcpp::Node::make_shared("centripetal_random_walk_actor_plugin_node", nodeOptions);
+        idsPub = rosNode->create_publisher<hri_msgs::msg::IdsList>("/humans/bodies/tracked", 10);
+        tfBroadcaster = std::make_unique<tf2_ros::TransformBroadcaster>(rosNode);
+
+        executor = std::make_shared<rclcpp::executors::SingleThreadedExecutor>();
+        executor->add_node(rosNode);
+        spinThread = std::thread([this]() {
+            executor->spin();
+        });
     }
 
     this->updateConnection = event::Events::ConnectWorldUpdateBegin(
@@ -114,11 +120,6 @@ void CentripetalRandomWalkActorPlugin::Load(physics::ModelPtr _model, sdf::Eleme
                 ignition::math::Vector3d(0.0, 0.0, 1.0),
                 ignition::math::Quaternion(1.57, 0.0, 0.0)),
             canonicalLink->GetScopedName());
-    }
-
-    if (!rclcpp::ok()) {
-        rclcpp::init(0, nullptr);
-        std::cout << "RCLCPP initialized in plugin.\n";
     }
 
     this->lastUpdate = common::Time::Zero;
@@ -213,23 +214,25 @@ void CentripetalRandomWalkActorPlugin::OnUpdate(const common::UpdateInfo &_info)
     this->actor->SetScriptTime(this->actor->ScriptTime() + dt);
     this->actor->Update();
 
-    hri_msgs::msg::IdsList idsMsg;
-    idsMsg.ids.push_back("gazeb");
-    idsMsg.header.stamp = rosNode->now() - rclcpp::Duration::from_seconds(0.5);
-    idsPub->publish(idsMsg);
+    if (hriSimulation) {
+        hri_msgs::msg::IdsList idsMsg;
+        idsMsg.ids.push_back("gazeb");
+        idsMsg.header.stamp = rosNode->now() - rclcpp::Duration::from_seconds(0.5);
+        idsPub->publish(idsMsg);
 
-    geometry_msgs::msg::TransformStamped t;
-    t.header.stamp = rosNode->now();
-    t.header.frame_id = "map";
-    t.child_frame_id = "body_gazeb";
-    t.transform.translation.x = newPos.X();
-    t.transform.translation.y = newPos.Y();
-    t.transform.translation.z = newPos.Z();
-    t.transform.rotation.x = rotForTransform.X();
-    t.transform.rotation.y = rotForTransform.Y();
-    t.transform.rotation.z = rotForTransform.Z();
-    t.transform.rotation.w = rotForTransform.W();
-    tfBroadcaster->sendTransform(t);
+        geometry_msgs::msg::TransformStamped t;
+        t.header.stamp = rosNode->now();
+        t.header.frame_id = "map";
+        t.child_frame_id = "body_gazeb";
+        t.transform.translation.x = newPos.X();
+        t.transform.translation.y = newPos.Y();
+        t.transform.translation.z = newPos.Z();
+        t.transform.rotation.x = rotForTransform.X();
+        t.transform.rotation.y = rotForTransform.Y();
+        t.transform.rotation.z = rotForTransform.Z();
+        t.transform.rotation.w = rotForTransform.W();
+        tfBroadcaster->sendTransform(t);
+    }
 }
 
 GZ_REGISTER_MODEL_PLUGIN(CentripetalRandomWalkActorPlugin)
